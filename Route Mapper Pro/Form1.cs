@@ -9,99 +9,233 @@ namespace Route_Mapper_Pro
     {
         private Point panel_location;
         private List<int> currentRoute = new List<int>();
-        private int currentStepIndex = 0;
+        private int currentRouteIndex = 0;
+        private MapData mapData = new MapData();
+        private float currentZoom = 1.0f; // 1.0 = 100% zoom
+        private const float ZoomIncrement = 0.25f; // How much to zoom in/out per step
+        private const float MinZoom = 0.5f; // Minimum zoom level
+        private const float MaxZoom = 3.0f; // Maximum zoom level
+        private PointF zoomCenter = PointF.Empty;
+        private Point dragStart;
+        private bool isDragging = false;
+        private float CoordinateScale { get; set; } = 10f; // Scale normalized coords to pixels
 
         public Form1()
         {
             InitializeComponent();
-            panel_location = mapPanel.Location;
+
+            // Enable double buffering
+            this.DoubleBuffered = true;
+
+            CoordinateScale = 10f;
+
+            // Initialize panel location at center
+            panel_location = new Point(
+                mapPanel.Width / 2 - (int)(0.5f * CoordinateScale),
+                mapPanel.Height / 2 - (int)(0.5f * CoordinateScale)
+            );
+
             currentRoute = new List<int>();
-            currentStepIndex = 0;
-            mapPanel.Invalidate(); // Use Invalidate instead of direct painting
+
+            // Set up event handlers
+            mapPanel.MouseWheel += mapPanel_MouseWheel;
+            mapPanel.MouseDown += mapPanel_MouseDown;
+            mapPanel.MouseUp += mapPanel_MouseUp;
+            mapPanel.MouseMove += mapPanel_MouseMove;
+
+            mapPanel.Invalidate();
+            UpdateCurrentLocationDisplay();
+            UpdateRouteInfo(mapData.QueryResults[0]);
         }
-
-        // Sample data: List of intersections (id, x, y)
-        private List<(int id, int x, int y)> intersections = new List<(int, int, int)>
-        {
-            (1, 100, 100),  // Intersection 1
-            (2, 300, 150),  // Intersection 2
-            (3, 200, 300),  // Intersection 3
-            (4, 300, 350)   // Intersection 4
-        };
-
-        // Sample data: List of all possible edges (fromId, toId, length, speed)
-        private List<(int fromId, int toId, int length, int speed)> allEdges = new List<(int, int, int, int)>
-        {
-            (1, 2, 150, 50),  // Connection between 1-2
-            (1, 3, 200, 40),  // Connection between 1-3
-            (2, 4, 120, 60),  // Connection between 2-4
-            (3, 4, 180, 45)   // Connection between 3-4
-        };
 
         private void mapPanel_Paint(object sender, PaintEventArgs e)
         {
             base.OnPaint(e);
             Graphics g = e.Graphics;
 
-            // Draw all edges in default color (blue)
-            DrawEdges(g, allEdges, Color.Blue);
+            // Apply transformations
+            g.TranslateTransform(panel_location.X, panel_location.Y);
+            g.ScaleTransform(currentZoom, currentZoom);
 
-            // Draw all intersections
-            DrawIntersections(g);
+            // Set high quality rendering
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
 
-            // Draw the current route if one exists
+            // Draw all elements
+            DrawEdges(g, mapData.Roads, Color.Blue);
+            if (CoordinateScale >= 10f)
+                DrawIntersections(g);
+
             if (currentRoute.Count > 1)
             {
-                DrawRoute(g, currentRoute, currentStepIndex);
+                DrawRoute(g, currentRoute, 0);
             }
         }
+        private float CalculateDynamicScale()
+        {
+            if (mapData.Intersections == null || mapData.Intersections.Count == 0)
+                return 10f; // Default scale if no points
+
+            // Find min and max coordinates
+            float minX = float.MaxValue, minY = float.MaxValue;
+            float maxX = float.MinValue, maxY = float.MinValue;
+
+            foreach (var point in mapData.Intersections)
+            {
+                minX = Math.Min(minX, point.x);
+                minY = Math.Min(minY, point.y);
+                maxX = Math.Max(maxX, point.x);
+                maxY = Math.Max(maxY, point.y);
+            }
+
+            // Calculate required scale to fit the points in the panel
+            float widthRatio = mapPanel.Width / (maxX - minX);
+            float heightRatio = mapPanel.Height / (maxY - minY);
+
+            // Use the smaller ratio to ensure everything fits
+            float scale = Math.Min(widthRatio, heightRatio) * 0.9f; // 90% to add some margin
+
+            // Apply minimum and maximum limits
+            return Math.Max(0.01f, Math.Min(1000f, scale));
+        }
+        private void mapPanel_MouseMove(object sender, MouseEventArgs e)
+        {
+            // Update zoom center
+            zoomCenter = e.Location;
+
+            // Handle panning
+            if (isDragging)
+            {
+                panel_location.X += e.X - dragStart.X;
+                panel_location.Y += e.Y - dragStart.Y;
+                dragStart = e.Location;
+                mapPanel.Invalidate();
+            }
+        }
+
+        private void mapPanel_MouseWheel(object sender, MouseEventArgs e)
+        {
+            if (e.Delta > 0)
+            {
+                ZoomAtPoint(currentZoom + ZoomIncrement, e.Location);
+            }
+            else
+            {
+                ZoomAtPoint(currentZoom - ZoomIncrement, e.Location);
+            }
+        }
+
+        private void ZoomAtPoint(float newZoom, PointF fixedPoint)
+        {
+            // Convert screen point to world coordinates
+            PointF worldBeforeZoom = new PointF(
+                (fixedPoint.X - panel_location.X) / currentZoom,
+                (fixedPoint.Y - panel_location.Y) / currentZoom
+            );
+
+            // Apply new zoom level with constraints
+            newZoom = Math.Max(MinZoom, Math.Min(MaxZoom, newZoom));
+
+            // Calculate new panel location to keep the point fixed
+            panel_location.X = (int)(fixedPoint.X - worldBeforeZoom.X * newZoom);
+            panel_location.Y = (int)(fixedPoint.Y - worldBeforeZoom.Y * newZoom);
+
+            currentZoom = newZoom;
+
+            mapPanel.Invalidate();
+            UpdateZoomLabel();
+        }
+        private void UpdateZoomLabel()
+        {
+            // Add a label to your form to display zoom level
+            zoomLabel.Text = $"{currentZoom * 100:F0}%";
+        }
+        private void mapPanel_MouseDown(object sender, MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left || e.Button == MouseButtons.Middle)
+            {
+                isDragging = true;
+                dragStart = e.Location;
+                mapPanel.Cursor = Cursors.Hand;
+            }
+        }
+        private void mapPanel_MouseUp(object sender, MouseEventArgs e)
+        {
+            isDragging = false;
+            mapPanel.Cursor = Cursors.Default;
+        }
+        private void CenterViewOnPoints()
+        {
+            if (mapData.Intersections == null || mapData.Intersections.Count == 0)
+                return;
+
+            // Find center of all points
+            float centerX = 0, centerY = 0;
+            foreach (var point in mapData.Intersections)
+            {
+                centerX += point.x;
+                centerY += point.y;
+            }
+            centerX /= mapData.Intersections.Count;
+            centerY /= mapData.Intersections.Count;
+
+            // Calculate panel location to center this point
+            panel_location = new Point(
+                mapPanel.Width / 2 - (int)(centerX * CoordinateScale * currentZoom),
+                mapPanel.Height / 2 - (int)(centerY * CoordinateScale * currentZoom)
+            );
+
+            mapPanel.Invalidate();
+        }
+
 
         private void DrawIntersections(Graphics g)
         {
-            int nodeSize = 12;
-            Font labelFont = new Font("Arial", 8);
+            int nodeSize = (int)(12 / currentZoom);
+            Font labelFont = new Font("Arial", Math.Max(6, 8 / currentZoom));
 
-            foreach (var intersection in intersections)
+            foreach (var intersection in mapData.Intersections)
             {
-                // Draw intersection point
-                g.FillEllipse(Brushes.Red,
-                             panel_location.X + intersection.x - nodeSize / 2,
-                             panel_location.Y + intersection.y - nodeSize / 2,
-                             nodeSize, nodeSize);
+                float x = intersection.x * CoordinateScale;
+                float y = intersection.y * CoordinateScale;
 
-                // Draw intersection ID
+                g.FillEllipse(Brushes.Red, x - nodeSize / 2, y - nodeSize / 2, nodeSize, nodeSize);
+
+                
                 g.DrawString(intersection.id.ToString(), labelFont, Brushes.Black,
-                             panel_location.X + intersection.x + nodeSize / 2,
-                             panel_location.Y + intersection.y + nodeSize / 2);
+                            x + nodeSize / 2 + 2,
+                            y + nodeSize / 2 + 2);
             }
         }
 
-        private void DrawEdges(Graphics g, List<(int fromId, int toId, int length, int speed)> edgesToDraw, Color edgeColor)
+        private void DrawEdges(Graphics g, List<(int fromId, int toId, float length, float speed)> edgesToDraw, Color edgeColor)
         {
             using (Pen roadPen = new Pen(edgeColor, 2))
             {
-                Font labelFont = new Font("Arial", 8);
+                Font labelFont = new Font("Arial", 8 / currentZoom); // Scale font with zoom
 
                 foreach (var edge in edgesToDraw)
                 {
-                    var fromNode = intersections.Find(i => i.id == edge.fromId);
-                    var toNode = intersections.Find(i => i.id == edge.toId);
+                    var fromNode = mapData.Intersections.Find(i => i.id == edge.fromId);
+                    var toNode = mapData.Intersections.Find(i => i.id == edge.toId);
 
                     if (fromNode != default && toNode != default)
                     {
-                        g.DrawLine(roadPen,
-                                 panel_location.X + fromNode.x,
-                                 panel_location.Y + fromNode.y,
-                                 panel_location.X + toNode.x,
-                                 panel_location.Y + toNode.y);
+                        // Scale coordinates
+                        float fromX = fromNode.x * CoordinateScale;
+                        float fromY = fromNode.y * CoordinateScale;
+                        float toX = toNode.x * CoordinateScale;
+                        float toY = toNode.y * CoordinateScale;
 
-                        int midX = (fromNode.x + toNode.x) / 2;
-                        int midY = (fromNode.y + toNode.y) / 2;
+                        g.DrawLine(roadPen, fromX, fromY, toX, toY);
 
                         string roadInfo = $"{edge.length}m\n{edge.speed}km/h";
-                        g.DrawString(roadInfo, labelFont, Brushes.DarkGreen,
-                                    panel_location.X + midX,
-                                    panel_location.Y + midY);
+                        float midX = (fromX + toX) / 2;  // Use scaled coordinates
+                        float midY = (fromY + toY) / 2;  // Use scaled coordinates
+
+                        if (CoordinateScale >= 10f)
+                            g.DrawString(roadInfo, labelFont, Brushes.DarkGreen, midX, midY);
+                  
                     }
                 }
             }
@@ -112,12 +246,9 @@ namespace Route_Mapper_Pro
             if (intersectionIds == null || intersectionIds.Count < 2)
                 return;
 
-            // Store the current route and reset position
             currentRoute = intersectionIds;
-            currentStepIndex = 0;
-
             UpdateCurrentLocationDisplay();
-            mapPanel.Invalidate(); // Trigger full repaint
+            mapPanel.Invalidate();
         }
 
         private void DrawRoute(Graphics g, List<int> route, int currentPosition)
@@ -125,45 +256,43 @@ namespace Route_Mapper_Pro
             if (route == null || route.Count < 2)
                 return;
 
-            // Draw the path edges (thicker black lines)
-            using (Pen pathPen = new Pen(Color.Black, 3))
+            using (Pen pathPen = new Pen(Color.Black, 3 / currentZoom))
             {
                 for (int i = 0; i < route.Count - 1; i++)
                 {
-                    var fromNode = intersections.Find(x => x.id == route[i]);
-                    var toNode = intersections.Find(x => x.id == route[i + 1]);
+                    var fromNode = mapData.Intersections.Find(x => x.id == route[i]);
+                    var toNode = mapData.Intersections.Find(x => x.id == route[i + 1]);
 
                     if (fromNode != default && toNode != default)
                     {
-                        g.DrawLine(pathPen,
-                                 panel_location.X + fromNode.x,
-                                 panel_location.Y + fromNode.y,
-                                 panel_location.X + toNode.x,
-                                 panel_location.Y + toNode.y);
+                        // Scale coordinates
+                        float fromX = fromNode.x * CoordinateScale;
+                        float fromY = fromNode.y * CoordinateScale;
+                        float toX = toNode.x * CoordinateScale;
+                        float toY = toNode.y * CoordinateScale;
+
+                        g.DrawLine(pathPen, fromX, fromY, toX, toY);
                     }
                 }
             }
 
-            // Draw start point (green)
-            var startIntersection = intersections.Find(i => i.id == route[0]);
+            var startIntersection = mapData.Intersections.Find(i => i.id == route[0]);
             if (startIntersection != default)
             {
                 DrawSpecialPoint(g, startIntersection, "Start",
                                new SolidBrush(Color.Green), false);
             }
 
-            // Draw end point (purple with star)
-            var endIntersection = intersections.Find(i => i.id == route[route.Count - 1]);
+            var endIntersection = mapData.Intersections.Find(i => i.id == route[route.Count - 1]);
             if (endIntersection != default)
             {
                 DrawSpecialPoint(g, endIntersection, "Destination",
                                new SolidBrush(Color.Purple), true);
             }
 
-            // Draw current position (blue)
             if (currentPosition >= 0 && currentPosition < route.Count)
             {
-                var currentIntersection = intersections.Find(i => i.id == route[currentPosition]);
+                var currentIntersection = mapData.Intersections.Find(i => i.id == route[currentPosition]);
                 if (currentIntersection != default)
                 {
                     DrawSpecialPoint(g, currentIntersection, "Current Location",
@@ -174,70 +303,69 @@ namespace Route_Mapper_Pro
 
         private void UpdateCurrentLocationDisplay()
         {
-            if (currentRoute != null && currentRoute.Count > 0 && currentStepIndex < currentRoute.Count)
+            if (currentRoute != null && currentRoute.Count > 0)
             {
-                var currentIntersection = intersections.Find(i => i.id == currentRoute[currentStepIndex]);
+                var currentIntersection = mapData.Intersections.Find(i => i.id == currentRoute[0]);
                 if (currentIntersection != default)
                 {
                     curr_loc_label.Text = $"( {currentIntersection.x}, {currentIntersection.y} )";
                 }
 
-                var endIntersection = intersections.Find(i => i.id == currentRoute[currentRoute.Count - 1]);
+                var endIntersection = mapData.Intersections.Find(i => i.id == currentRoute[currentRoute.Count - 1]);
                 if (endIntersection != default)
                 {
                     dest_label.Text = $"( {endIntersection.x}, {endIntersection.y} )";
                 }
+
+                // Show current route number
+                route_number_label.Text = $"Route {currentRouteIndex + 1} of {mapData.QueryResults.Count}";
+            }
+            else
+            {
+                curr_loc_label.Text = "Not Available";
+                dest_label.Text = "Not Available";
+                route_number_label.Text = "No Active Route";
             }
         }
 
-        private void DrawSpecialPoint(Graphics g, (int id, int x, int y) intersection,
-                                    string label, Brush color, bool isDestination)
+        private void DrawSpecialPoint(Graphics g, (int id, float x, float y) intersection,
+                    string label, Brush color, bool isDestination)
         {
-            int nodeSize = isDestination ? 20 : 18;
+            // Scale the coordinates first
+            float x = intersection.x * CoordinateScale;
+            float y = intersection.y * CoordinateScale;
+
+            int nodeSize = (int)((isDestination ? 20 : 18) / currentZoom);
             int outlineSize = nodeSize + 4;
-            Font labelFont = new Font("Arial", 9, FontStyle.Bold);
+            Font labelFont = new Font("Arial", Math.Max(8, 9 / currentZoom), FontStyle.Bold);
 
-            // Draw white outline
-            g.FillEllipse(Brushes.White,
-                         panel_location.X + intersection.x - outlineSize / 2,
-                         panel_location.Y + intersection.y - outlineSize / 2,
-                         outlineSize, outlineSize);
+            g.FillEllipse(Brushes.White, x - outlineSize / 2, y - outlineSize / 2, outlineSize, outlineSize);
+            g.FillEllipse(color, x - nodeSize / 2, y - nodeSize / 2, nodeSize, nodeSize);
 
-            // Draw main colored circle
-            g.FillEllipse(color,
-                         panel_location.X + intersection.x - nodeSize / 2,
-                         panel_location.Y + intersection.y - nodeSize / 2,
-                         nodeSize, nodeSize);
-
-            // Draw destination star icon
             if (isDestination)
             {
-                PointF center = new PointF(panel_location.X + intersection.x,
-                                         panel_location.Y + intersection.y);
+                PointF center = new PointF(x, y);
                 DrawStar(g, center, nodeSize / 2 - 2, nodeSize / 4, 5, Brushes.White);
             }
 
-            // Draw the label
             SizeF textSize = g.MeasureString(label, labelFont);
-            float labelY = panel_location.Y + intersection.y - nodeSize - textSize.Height - 2;
+            float labelY = y - nodeSize - textSize.Height - 2;
 
-            // Label background
             g.FillRectangle(Brushes.White,
-                           panel_location.X + intersection.x - textSize.Width / 2 - 2,
+                           x - textSize.Width / 2 - 2,
                            labelY - 1,
                            textSize.Width + 4,
                            textSize.Height + 2);
 
             g.DrawString(label, labelFont, Brushes.Black,
-                         panel_location.X + intersection.x - textSize.Width / 2,
+                         x - textSize.Width / 2,
                          labelY);
 
-            // ID in center
-            Font idFont = new Font("Arial", 8, FontStyle.Bold);
+            Font idFont = new Font("Arial", Math.Max(7, 8 / currentZoom), FontStyle.Bold);
             g.DrawString(intersection.id.ToString(), idFont,
                          isDestination ? Brushes.White : Brushes.Black,
-                         panel_location.X + intersection.x - 4,
-                         panel_location.Y + intersection.y - 6);
+                         x - 4,
+                         y - 6);
         }
 
         private void DrawStar(Graphics g, PointF center, float outerRadius, float innerRadius, int points, Brush brush)
@@ -247,7 +375,7 @@ namespace Route_Mapper_Pro
 
             for (int i = 0; i < points * 2; i++)
             {
-                float radius = i % 2 == 0 ? outerRadius : innerRadius;
+                float radius = i % 2 == 0 ? outerRadius / currentZoom : innerRadius / currentZoom; // Scale radii
                 starPoints[i] = new PointF(
                     center.X + (float)(radius * Math.Sin(i * angle)),
                     center.Y + (float)(radius * Math.Cos(i * angle))
@@ -257,29 +385,71 @@ namespace Route_Mapper_Pro
             g.FillPolygon(brush, starPoints);
         }
 
-        private void plot_route_btn_click(object sender, EventArgs e)
+        private void load_route_btn_Click(object sender, EventArgs e)
         {
-            DrawBlackEdgesBetween(new List<int> { 1, 3, 4 });
+            OpenFileDialog openFileDialog = new OpenFileDialog();
+            openFileDialog.Filter = "Map Files (*.txt)|*.txt|All Files (*.*)|*.*";
+
+            if (openFileDialog.ShowDialog() == DialogResult.OK)
+            {
+                mapData.LoadMapFile(openFileDialog.FileName);
+                CoordinateScale = CalculateDynamicScale(); // Calculate scale after loading
+                CenterViewOnPoints();
+                currentRoute.Clear();
+                mapPanel.Invalidate();
+            }
         }
 
-        private void next_step_btn_Click(object sender, EventArgs e)
+        private void plot_route_btn_click(object sender, EventArgs e)
         {
-            if (currentRoute == null || currentRoute.Count == 0)
+            OpenFileDialog openFileDialog = new OpenFileDialog();
+            openFileDialog.Filter = "Output Files (*.txt)|*.txt|All Files (*.*)|*.*";
+
+            if (openFileDialog.ShowDialog() == DialogResult.OK)
             {
-                MessageBox.Show("No route is currently active.");
+                mapData.LoadOutputFile(openFileDialog.FileName);
+                if (mapData.QueryResults.Count > 0)
+                {
+                    CoordinateScale = CalculateDynamicScale(); // Recalculate scale
+                    currentRouteIndex = 0;
+                    DrawBlackEdgesBetween(mapData.QueryResults[currentRouteIndex].PathIds);
+                    UpdateRouteInfo(mapData.QueryResults[currentRouteIndex]);
+                }
+            }
+        }
+
+        private void UpdateRouteInfo(QueryResult result)
+        {
+
+            shortest_time_label.Text = $"{result.ShortestTime:F2} mins";
+            path_length_label.Text = $"{result.TotalDistance:F2} km";
+            walking_dist_label.Text = $"{result.WalkingDistance:F2} km";
+            vehicle_dist_label.Text = $"{result.VehicleDistance:F2} km";
+            time_label.Text = $"{mapData.QueryExecutionTime} ms";
+            time_with_IO_label.Text = $"{mapData.QueryExecutionTime_with_IO} ms";
+        }
+
+        private void next_route_btn_Click(object sender, EventArgs e)
+        {
+            if (mapData.QueryResults == null || mapData.QueryResults.Count == 0)
+            {
+                MessageBox.Show("No routes available.");
                 return;
             }
 
-            if (currentStepIndex < currentRoute.Count - 1)
-            {
-                currentStepIndex++;
-                UpdateCurrentLocationDisplay();
-                mapPanel.Invalidate(); // This will trigger mapPanel_Paint with updated position
-            }
-            else
-            {
-                MessageBox.Show("Already at the destination!");
-            }
+            // Increment route index (with wrap-around)
+            currentRouteIndex = (currentRouteIndex + 1) % mapData.QueryResults.Count;
+
+            // Get the new route
+            var nextRoute = mapData.QueryResults[currentRouteIndex];
+
+            // Update display
+            DrawBlackEdgesBetween(nextRoute.PathIds);
+            UpdateRouteInfo(nextRoute);
+
+            // Reset current position to start of route
+            UpdateCurrentLocationDisplay();
+            mapPanel.Invalidate();
         }
     }
 }
