@@ -4,130 +4,27 @@ using System.IO;
 
 namespace Route_Mapper_Pro
 {
-    // Fast heap-based priority queue implementation optimized for Dijkstra's algorithm
-    public class FastPriorityQueue
+    // QueueItem for use with SortedSet
+    public class QueueItem : IComparable<QueueItem>
     {
-        private struct HeapItem
+        public int Node { get; }
+        public double Priority { get; }
+
+        public QueueItem(int node, double priority)
         {
-            public int Node;
-            public double Priority;
+            Node = node;
+            Priority = priority;
         }
 
-        private HeapItem[] _heap;
-        private int[] _indices;
-        private int _count;
-        private int _capacity;
-
-        public FastPriorityQueue(int capacity)
+        public int CompareTo(QueueItem other)
         {
-            _capacity = capacity;
-            _heap = new HeapItem[capacity];
-            _indices = new int[capacity];
-            _count = 0;
+            // First compare by priority
+            int priorityComparison = Priority.CompareTo(other.Priority);
+            if (priorityComparison != 0)
+                return priorityComparison;
 
-            // Initialize indices array to -1 (not in heap)
-            for (int i = 0; i < capacity; i++)
-            {
-                _indices[i] = -1;
-            }
-        }
-
-        public int Count => _count;
-
-        public void Enqueue(int node, double priority)
-        {
-            if (_indices[node] != -1)
-            {
-                // Node already in heap, update priority if better
-                int pos = _indices[node];
-                if (priority < _heap[pos].Priority)
-                {
-                    _heap[pos].Priority = priority;
-                    SiftUp(pos);
-                }
-                return;
-            }
-
-            // Add new node
-            _heap[_count] = new HeapItem { Node = node, Priority = priority };
-            _indices[node] = _count;
-            _count++;
-            SiftUp(_count - 1);
-        }
-
-        public bool TryDequeue(out int node, out double priority)
-        {
-            if (_count == 0)
-            {
-                node = -1;
-                priority = 0;
-                return false;
-            }
-
-            node = _heap[0].Node;
-            priority = _heap[0].Priority;
-
-            // Remove from heap
-            _count--;
-            _indices[node] = -1;
-
-            if (_count > 0)
-            {
-                // Replace root with last element
-                _heap[0] = _heap[_count];
-                _indices[_heap[0].Node] = 0;
-                SiftDown(0);
-            }
-
-            return true;
-        }
-
-        private void SiftUp(int index)
-        {
-            HeapItem item = _heap[index];
-            int parentIndex;
-
-            while (index > 0)
-            {
-                parentIndex = (index - 1) >> 1;
-                if (_heap[parentIndex].Priority <= item.Priority)
-                    break;
-
-                _heap[index] = _heap[parentIndex];
-                _indices[_heap[index].Node] = index;
-                index = parentIndex;
-            }
-
-            _heap[index] = item;
-            _indices[item.Node] = index;
-        }
-
-        private void SiftDown(int index)
-        {
-            HeapItem item = _heap[index];
-            int childIndex;
-            int minChildIndex;
-
-            while ((childIndex = (index << 1) + 1) < _count)
-            {
-                // Find the minimum child
-                minChildIndex = childIndex;
-                if (childIndex + 1 < _count &&
-                    _heap[childIndex + 1].Priority < _heap[childIndex].Priority)
-                {
-                    minChildIndex = childIndex + 1;
-                }
-
-                if (item.Priority <= _heap[minChildIndex].Priority)
-                    break;
-
-                _heap[index] = _heap[minChildIndex];
-                _indices[_heap[index].Node] = index;
-                index = minChildIndex;
-            }
-
-            _heap[index] = item;
-            _indices[item.Node] = index;
+            // If priorities are equal, compare by node ID to ensure consistent ordering
+            return Node.CompareTo(other.Node);
         }
     }
 
@@ -202,14 +99,16 @@ namespace Route_Mapper_Pro
                 // Use arrays for better cache locality
                 double[] dist = new double[n];
                 int[] parent = new int[n];
+                bool[] inQueue = new bool[n]; // To track nodes in the queue
                 for (int i = 0; i < n; i++)
                 {
                     dist[i] = double.PositiveInfinity;
                     parent[i] = -1;
+                    inQueue[i] = false;
                 }
 
-                // Use our optimized priority queue implementation
-                FastPriorityQueue pq = new FastPriorityQueue(n);
+                // Use SortedSet as priority queue
+                var pq = new SortedSet<QueueItem>();
 
                 // Precompute distances to start and end
                 double[] distToStart = new double[n];
@@ -239,7 +138,8 @@ namespace Route_Mapper_Pro
                     if (withinRangeFromStart[i])
                     {
                         dist[i] = distToStart[i] / walkSpeed;
-                        pq.Enqueue(i, dist[i]);
+                        pq.Add(new QueueItem(i, dist[i]));
+                        inQueue[i] = true;
                     }
                 }
 
@@ -249,8 +149,16 @@ namespace Route_Mapper_Pro
                 int bestNode = -1;
 
                 // Dijkstra's algorithm
-                while (pq.TryDequeue(out int cur, out double cost))
+                while (pq.Count > 0)
                 {
+                    // Get and remove the minimum element
+                    var current = pq.Min;
+                    pq.Remove(current);
+
+                    int cur = current.Node;
+                    double cost = current.Priority;
+                    inQueue[cur] = false;
+
                     // Skip if we've found a better path to this node already
                     if (cost > dist[cur] + eps)
                         continue;
@@ -279,7 +187,16 @@ namespace Route_Mapper_Pro
                         {
                             dist[neighbor] = newCost;
                             parent[neighbor] = cur;
-                            pq.Enqueue(neighbor, newCost);
+
+                            // For SortedSet, we need to add a new instance
+                            if (inQueue[neighbor])
+                            {
+                                // We can't directly update priority, so remove and add again
+                                pq.RemoveWhere(item => item.Node == neighbor);
+                            }
+
+                            pq.Add(new QueueItem(neighbor, newCost));
+                            inQueue[neighbor] = true;
                         }
                     }
                 }
@@ -393,4 +310,3 @@ namespace Route_Mapper_Pro
         }
     }
 }
- 
