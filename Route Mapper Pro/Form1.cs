@@ -2,6 +2,8 @@
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace Route_Mapper_Pro
@@ -20,6 +22,8 @@ namespace Route_Mapper_Pro
         private Point dragStart;
         private bool isDragging = false;
         private float CoordinateScale { get; set; } = 10f; // Scale normalized coords to pixels
+        private Dictionary<int, (float x, float y)> _scaledIntersectionCache;
+        private DateTime _lastCacheInvalidation = DateTime.MinValue;
 
         public Form1()
         {
@@ -46,7 +50,10 @@ namespace Route_Mapper_Pro
 
             mapPanel.Invalidate();
             UpdateCurrentLocationDisplay();
-            UpdateRouteInfo(mapData.QueryResults[0]);
+            if (mapData.QueryResults.Count > 0)
+            {
+                UpdateRouteInfo(mapData.QueryResults[0]);
+            }
         }
 
         private void mapPanel_Paint(object sender, PaintEventArgs e)
@@ -188,55 +195,93 @@ namespace Route_Mapper_Pro
 
             mapPanel.Invalidate();
         }
+        private void UpdateScaledIntersectionCache()
+        {
+            // Only rebuild cache if data changed or zoom/scale changed
+            if ((DateTime.Now - _lastCacheInvalidation).TotalSeconds < 0.5 &&
+                _scaledIntersectionCache != null)
+                return;
 
+            _scaledIntersectionCache = mapData.Intersections?
+                .ToDictionary(
+                    i => i.id,
+                    i => (i.x * CoordinateScale, i.y * CoordinateScale)
+                );
 
+            _lastCacheInvalidation = DateTime.Now;
+        }
         private void DrawIntersections(Graphics g)
         {
+            if (mapData.Intersections == null || mapData.Intersections.Count == 0)
+                return;
+
             int nodeSize = (int)(12 / currentZoom);
-            Font labelFont = new Font("Arial", Math.Max(6, 8 / currentZoom));
-
-            foreach (var intersection in mapData.Intersections)
+            using (var labelFont = new Font("Arial", Math.Max(6, 8 / currentZoom)))
+            using (var brush = new SolidBrush(Color.Red))
             {
-                float x = intersection.x * CoordinateScale;
-                float y = intersection.y * CoordinateScale;
+                // Pre-calculate scaled positions
+                var scaledPoints = mapData.Intersections
+                    .Select(i => new
+                    {
+                        i.id,
+                        X = i.x * CoordinateScale,
+                        Y = i.y * CoordinateScale
+                    })
+                    .ToList();
 
-                g.FillEllipse(Brushes.Red, x - nodeSize / 2, y - nodeSize / 2, nodeSize, nodeSize);
-
-                
-                g.DrawString(intersection.id.ToString(), labelFont, Brushes.Black,
-                            x + nodeSize / 2 + 2,
-                            y + nodeSize / 2 + 2);
+                // Draw in batches
+                foreach (var point in scaledPoints)
+                {
+                    g.FillEllipse(brush, point.X - nodeSize / 2, point.Y - nodeSize / 2, nodeSize, nodeSize);
+                    g.DrawString(point.id.ToString(), labelFont, Brushes.Black,
+                                point.X + nodeSize / 2 + 2,
+                                point.Y + nodeSize / 2 + 2);
+                }
             }
         }
 
         private void DrawEdges(Graphics g, List<(int fromId, int toId, float length, float speed)> edgesToDraw, Color edgeColor)
         {
-            using (Pen roadPen = new Pen(edgeColor, 2))
-            {
-                Font labelFont = new Font("Arial", 8 / currentZoom); // Scale font with zoom
+            if (edgesToDraw == null || edgesToDraw.Count == 0)
+                return;
 
+            using (var pen = new Pen(edgeColor, 2))
+            using (var labelFont = new Font("Arial", 8 / currentZoom))
+            {
+                // Pre-cache all needed nodes
+                var nodeCache = new Dictionary<int, (float x, float y)>();
                 foreach (var edge in edgesToDraw)
                 {
-                    var fromNode = mapData.Intersections.Find(i => i.id == edge.fromId);
-                    var toNode = mapData.Intersections.Find(i => i.id == edge.toId);
-
-                    if (fromNode != default && toNode != default)
+                    if (!nodeCache.ContainsKey(edge.fromId))
                     {
-                        // Scale coordinates
-                        float fromX = fromNode.x * CoordinateScale;
-                        float fromY = fromNode.y * CoordinateScale;
-                        float toX = toNode.x * CoordinateScale;
-                        float toY = toNode.y * CoordinateScale;
+                        var node = mapData.Intersections.Find(i => i.id == edge.fromId);
+                        if (node != default)
+                            nodeCache[edge.fromId] = (node.x * CoordinateScale, node.y * CoordinateScale);
+                    }
 
-                        g.DrawLine(roadPen, fromX, fromY, toX, toY);
+                    if (!nodeCache.ContainsKey(edge.toId))
+                    {
+                        var node = mapData.Intersections.Find(i => i.id == edge.toId);
+                        if (node != default)
+                            nodeCache[edge.toId] = (node.x * CoordinateScale, node.y * CoordinateScale);
+                    }
+                }
 
-                        string roadInfo = $"{edge.length}m\n{edge.speed}km/h";
-                        float midX = (fromX + toX) / 2;  // Use scaled coordinates
-                        float midY = (fromY + toY) / 2;  // Use scaled coordinates
+                // Draw all edges
+                foreach (var edge in edgesToDraw)
+                {
+                    if (nodeCache.TryGetValue(edge.fromId, out var fromNode) &&
+                        nodeCache.TryGetValue(edge.toId, out var toNode))
+                    {
+                        g.DrawLine(pen, fromNode.x, fromNode.y, toNode.x, toNode.y);
 
                         if (CoordinateScale >= 10f)
+                        {
+                            string roadInfo = $"{edge.length}m\n{edge.speed}km/h";
+                            float midX = (fromNode.x + toNode.x) / 2;
+                            float midY = (fromNode.y + toNode.y) / 2;
                             g.DrawString(roadInfo, labelFont, Brushes.DarkGreen, midX, midY);
-                  
+                        }
                     }
                 }
             }
@@ -257,48 +302,39 @@ namespace Route_Mapper_Pro
             if (route == null || route.Count < 2)
                 return;
 
-            using (Pen pathPen = new Pen(Color.Black, 3 / currentZoom))
+            UpdateScaledIntersectionCache(); // Ensure cache is up to date
+
+            using (var pathPen = new Pen(Color.Black, 3 / currentZoom))
             {
+                // Draw all path segments
                 for (int i = 0; i < route.Count - 1; i++)
                 {
-                    var fromNode = mapData.Intersections.Find(x => x.id == route[i]);
-                    var toNode = mapData.Intersections.Find(x => x.id == route[i + 1]);
-
-                    if (fromNode != default && toNode != default)
+                    if (_scaledIntersectionCache.TryGetValue(route[i], out var fromNode) &&
+                        _scaledIntersectionCache.TryGetValue(route[i + 1], out var toNode))
                     {
-                        // Scale coordinates
-                        float fromX = fromNode.x * CoordinateScale;
-                        float fromY = fromNode.y * CoordinateScale;
-                        float toX = toNode.x * CoordinateScale;
-                        float toY = toNode.y * CoordinateScale;
-
-                        g.DrawLine(pathPen, fromX, fromY, toX, toY);
+                        g.DrawLine(pathPen, fromNode.x, fromNode.y, toNode.x, toNode.y);
                     }
                 }
             }
 
-            var startIntersection = mapData.Intersections.Find(i => i.id == route[0]);
-            if (startIntersection != default)
+            // Draw special points (start, end, current)
+            if (_scaledIntersectionCache.TryGetValue(route[0], out var startNode))
             {
-                DrawSpecialPoint(g, startIntersection, "Start",
-                               new SolidBrush(Color.Green), false);
+                DrawSpecialPoint(g, (route[0], startNode.x, startNode.y), "Start",
+                               Brushes.Green, false);
             }
 
-            var endIntersection = mapData.Intersections.Find(i => i.id == route[route.Count - 1]);
-            if (endIntersection != default)
+            if (_scaledIntersectionCache.TryGetValue(route[route.Count - 1], out var endNode))
             {
-                DrawSpecialPoint(g, endIntersection, "Destination",
-                               new SolidBrush(Color.Purple), true);
+                DrawSpecialPoint(g, (route[route.Count - 1], endNode.x, endNode.y),
+                               "Destination", Brushes.Purple, true);
             }
 
-            if (currentPosition >= 0 && currentPosition < route.Count)
+            if (currentPosition >= 0 && currentPosition < route.Count &&
+                _scaledIntersectionCache.TryGetValue(route[currentPosition], out var currentNode))
             {
-                var currentIntersection = mapData.Intersections.Find(i => i.id == route[currentPosition]);
-                if (currentIntersection != default)
-                {
-                    DrawSpecialPoint(g, currentIntersection, "Current Location",
-                                   new SolidBrush(Color.Blue), false);
-                }
+                DrawSpecialPoint(g, (route[currentPosition], currentNode.x, currentNode.y),
+                               "Current Location", Brushes.Blue, false);
             }
         }
 
@@ -332,9 +368,9 @@ namespace Route_Mapper_Pro
         private void DrawSpecialPoint(Graphics g, (int id, float x, float y) intersection,
                     string label, Brush color, bool isDestination)
         {
-            // Scale the coordinates first
-            float x = intersection.x * CoordinateScale;
-            float y = intersection.y * CoordinateScale;
+
+            float x = intersection.x;
+            float y = intersection.y;
 
             int nodeSize = (int)((isDestination ? 20 : 18) / currentZoom);
             int outlineSize = nodeSize + 4;
@@ -402,7 +438,7 @@ namespace Route_Mapper_Pro
                 mapPanel.Invalidate();
             }
         }
-        
+
         private void plot_route_btn_click(object sender, EventArgs e)
         {
             var choiceDialog = new Form()
