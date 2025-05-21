@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.IO;
 using System.Windows.Forms;
 
 namespace Route_Mapper_Pro
@@ -96,7 +97,7 @@ namespace Route_Mapper_Pro
             float scale = Math.Min(widthRatio, heightRatio) * 0.9f; // 90% to add some margin
 
             // Apply minimum and maximum limits
-            return Math.Max(0.01f, Math.Min(1000f, scale));
+            return scale;
         }
         private void mapPanel_MouseMove(object sender, MouseEventArgs e)
         {
@@ -392,28 +393,137 @@ namespace Route_Mapper_Pro
 
             if (openFileDialog.ShowDialog() == DialogResult.OK)
             {
+                // Load the map file
                 mapData.LoadMapFile(openFileDialog.FileName);
+
                 CoordinateScale = CalculateDynamicScale(); // Calculate scale after loading
                 CenterViewOnPoints();
                 currentRoute.Clear();
                 mapPanel.Invalidate();
             }
         }
-
+        
         private void plot_route_btn_click(object sender, EventArgs e)
+        {
+            var choiceDialog = new Form()
+            {
+                Text = "Select Input Type",
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition = FormStartPosition.CenterParent,
+                Width = 300,
+                Height = 150
+            };
+
+            var label = new Label()
+            {
+                Text = "Would you like to load:",
+                Left = 20,
+                Top = 20,
+                Width = 250,
+                AutoSize = true
+            };
+
+            var queryButton = new Button()
+            {
+                Text = "Query File (process new routes)",
+                Left = 20,
+                Top = 50,
+                Width = 250,
+                DialogResult = DialogResult.Yes
+            };
+
+            var outputButton = new Button()
+            {
+                Text = "Output File (load existing results)",
+                Left = 20,
+                Top = 80,
+                Width = 250,
+                DialogResult = DialogResult.No
+            };
+
+            queryButton.Click += (s, args) => { choiceDialog.Close(); };
+            outputButton.Click += (s, args) => { choiceDialog.Close(); };
+
+            choiceDialog.Controls.Add(label);
+            choiceDialog.Controls.Add(queryButton);
+            choiceDialog.Controls.Add(outputButton);
+            choiceDialog.AcceptButton = queryButton;
+            choiceDialog.CancelButton = outputButton;
+
+            var result = choiceDialog.ShowDialog(this);
+
+            if (result == DialogResult.Yes)
+            {
+                plot_route_btn_click_queryFile(sender, e);
+            }
+            else if (result == DialogResult.No)
+            {
+                plot_route_btn_click_outputFile(sender, e);
+            }
+        }
+
+        private void plot_route_btn_click_outputFile(object sender, EventArgs e)
         {
             OpenFileDialog openFileDialog = new OpenFileDialog();
             openFileDialog.Filter = "Output Files (*.txt)|*.txt|All Files (*.*)|*.*";
+            openFileDialog.Title = "Select Output File to Load";
 
             if (openFileDialog.ShowDialog() == DialogResult.OK)
             {
-                mapData.LoadOutputFile(openFileDialog.FileName);
-                if (mapData.QueryResults.Count > 0)
+                try
                 {
-                    CoordinateScale = CalculateDynamicScale(); // Recalculate scale
-                    currentRouteIndex = 0;
-                    DrawBlackEdgesBetween(mapData.QueryResults[currentRouteIndex].PathIds);
-                    UpdateRouteInfo(mapData.QueryResults[currentRouteIndex]);
+                    mapData.LoadOutputFile(openFileDialog.FileName);
+                    if (mapData.QueryResults.Count > 0)
+                    {
+                        CoordinateScale = CalculateDynamicScale();
+                        currentRouteIndex = 0;
+                        DrawBlackEdgesBetween(mapData.QueryResults[currentRouteIndex].PathIds);
+                        UpdateRouteInfo(mapData.QueryResults[currentRouteIndex]);
+                        MessageBox.Show("Output file loaded successfully!", "Success",
+                                      MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                    else
+                    {
+                        MessageBox.Show("The selected output file contains no valid results.",
+                                      "Warning", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Error loading output file: {ex.Message}",
+                                  "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+        }
+
+        private void plot_route_btn_click_queryFile(object sender, EventArgs e)
+        {
+            OpenFileDialog openFileDialog = new OpenFileDialog();
+            openFileDialog.Filter = "Query Files (*.txt)|*.txt|All Files (*.*)|*.*";
+            openFileDialog.Title = "Select Query File to Process";
+
+            if (openFileDialog.ShowDialog() == DialogResult.OK)
+            {
+                try
+                {
+                    mapData = PathFinder.SolveWithTiming(mapData, openFileDialog.FileName);
+                    if (mapData.QueryResults.Count > 0)
+                    {
+                        CoordinateScale = CalculateDynamicScale();
+                        currentRouteIndex = 0;
+                        DrawBlackEdgesBetween(mapData.QueryResults[currentRouteIndex].PathIds);
+                        UpdateRouteInfo(mapData.QueryResults[currentRouteIndex]);
+                    }
+                    else
+                    {
+                        MessageBox.Show("No routes were found for the given queries.",
+                                      "Warning", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Error processing query file: {ex.Message}",
+                                  "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
         }
