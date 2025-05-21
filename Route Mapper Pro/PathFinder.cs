@@ -2,37 +2,135 @@
 using System.Collections.Generic;
 using System.IO;
 
-
 namespace Route_Mapper_Pro
 {
-    public class PriorityQueue<TElement, TPriority> where TPriority : IComparable<TPriority>
+    // Fast heap-based priority queue implementation optimized for Dijkstra's algorithm
+    public class FastPriorityQueue
     {
-        private readonly List<(TElement Element, TPriority Priority)> _elements = new List<(TElement, TPriority)>();
-
-        public int Count => _elements.Count;
-
-        public void Enqueue(TElement element, TPriority priority)
+        private struct HeapItem
         {
-            _elements.Add((element, priority));
-            _elements.Sort((a, b) => a.Priority.CompareTo(b.Priority));
+            public int Node;
+            public double Priority;
         }
 
-        public bool TryDequeue(out TElement element, out TPriority priority)
+        private HeapItem[] _heap;
+        private int[] _indices;
+        private int _count;
+        private int _capacity;
+
+        public FastPriorityQueue(int capacity)
         {
-            if (_elements.Count == 0)
+            _capacity = capacity;
+            _heap = new HeapItem[capacity];
+            _indices = new int[capacity];
+            _count = 0;
+
+            // Initialize indices array to -1 (not in heap)
+            for (int i = 0; i < capacity; i++)
             {
-                element = default;
-                priority = default;
+                _indices[i] = -1;
+            }
+        }
+
+        public int Count => _count;
+
+        public void Enqueue(int node, double priority)
+        {
+            if (_indices[node] != -1)
+            {
+                // Node already in heap, update priority if better
+                int pos = _indices[node];
+                if (priority < _heap[pos].Priority)
+                {
+                    _heap[pos].Priority = priority;
+                    SiftUp(pos);
+                }
+                return;
+            }
+
+            // Add new node
+            _heap[_count] = new HeapItem { Node = node, Priority = priority };
+            _indices[node] = _count;
+            _count++;
+            SiftUp(_count - 1);
+        }
+
+        public bool TryDequeue(out int node, out double priority)
+        {
+            if (_count == 0)
+            {
+                node = -1;
+                priority = 0;
                 return false;
             }
 
-            var item = _elements[0];
-            _elements.RemoveAt(0);
-            element = item.Element;
-            priority = item.Priority;
+            node = _heap[0].Node;
+            priority = _heap[0].Priority;
+
+            // Remove from heap
+            _count--;
+            _indices[node] = -1;
+
+            if (_count > 0)
+            {
+                // Replace root with last element
+                _heap[0] = _heap[_count];
+                _indices[_heap[0].Node] = 0;
+                SiftDown(0);
+            }
+
             return true;
         }
+
+        private void SiftUp(int index)
+        {
+            HeapItem item = _heap[index];
+            int parentIndex;
+
+            while (index > 0)
+            {
+                parentIndex = (index - 1) >> 1;
+                if (_heap[parentIndex].Priority <= item.Priority)
+                    break;
+
+                _heap[index] = _heap[parentIndex];
+                _indices[_heap[index].Node] = index;
+                index = parentIndex;
+            }
+
+            _heap[index] = item;
+            _indices[item.Node] = index;
+        }
+
+        private void SiftDown(int index)
+        {
+            HeapItem item = _heap[index];
+            int childIndex;
+            int minChildIndex;
+
+            while ((childIndex = (index << 1) + 1) < _count)
+            {
+                // Find the minimum child
+                minChildIndex = childIndex;
+                if (childIndex + 1 < _count &&
+                    _heap[childIndex + 1].Priority < _heap[childIndex].Priority)
+                {
+                    minChildIndex = childIndex + 1;
+                }
+
+                if (item.Priority <= _heap[minChildIndex].Priority)
+                    break;
+
+                _heap[index] = _heap[minChildIndex];
+                _indices[_heap[index].Node] = index;
+                index = minChildIndex;
+            }
+
+            _heap[index] = item;
+            _indices[item.Node] = index;
+        }
     }
+
     internal class PathFinder
     {
         public struct Point
@@ -47,19 +145,25 @@ namespace Route_Mapper_Pro
             }
         }
 
-        private static double EuclideanDistance(in Point a, in Point b)
+        // Faster distance calculation - using squared distance where possible to avoid sqrt
+        private static double SquaredDistance(in Point a, in Point b)
         {
             double dx = a.X - b.X;
             double dy = a.Y - b.Y;
-            return Math.Sqrt(dx * dx + dy * dy);
+            return dx * dx + dy * dy;
+        }
+
+        private static double EuclideanDistance(in Point a, in Point b)
+        {
+            return Math.Sqrt(SquaredDistance(a, b));
         }
 
         public static MapData Solve(MapData mapData, List<Query> queries)
         {
             const double walkSpeed = 5.0;
-            const double eps = 1e-6;
+            const double eps = 1e-9; // Smaller epsilon for more precision
 
-            // Convert intersections to Points
+            // Convert intersections to Points - preallocate the array size
             int n = mapData.Intersections.Count;
             Point[] intersections = new Point[n];
             for (int i = 0; i < n; i++)
@@ -68,13 +172,11 @@ namespace Route_Mapper_Pro
                 intersections[i] = new Point(intersection.x, intersection.y);
             }
 
-            // Build road network
-            Dictionary<int, double>[] roads = new Dictionary<int, double>[n];
-            Dictionary<int, double>[] lengths = new Dictionary<int, double>[n];
+            // Build adjacency lists for the road network - more efficient than dictionaries
+            List<(int Node, double Cost, double Length)>[] roads = new List<(int, double, double)>[n];
             for (int i = 0; i < n; i++)
             {
-                roads[i] = new Dictionary<int, double>();
-                lengths[i] = new Dictionary<int, double>();
+                roads[i] = new List<(int, double, double)>(4); // Preallocation with typical degree
             }
 
             foreach (var road in mapData.Roads)
@@ -85,19 +187,19 @@ namespace Route_Mapper_Pro
                 double speed = road.speed;
                 double cost = len / speed;
 
-                roads[u][v] = cost;
-                roads[v][u] = cost;
-                lengths[u][v] = len;
-                lengths[v][u] = len;
+                roads[u].Add((v, cost, len));
+                roads[v].Add((u, cost, len));
             }
 
-            // Process queries
+            // Process each query
             foreach (var query in queries)
             {
                 Point start = new Point(query.SourceX, query.SourceY);
                 Point end = new Point(query.DestX, query.DestY);
                 double r = query.R / 1000.0;
+                double rSquared = r * r; // Square the radius for squared distance comparisons
 
+                // Use arrays for better cache locality
                 double[] dist = new double[n];
                 int[] parent = new int[n];
                 for (int i = 0; i < n; i++)
@@ -106,21 +208,35 @@ namespace Route_Mapper_Pro
                     parent[i] = -1;
                 }
 
-                var pq = new PriorityQueue<int, double>();
+                // Use our optimized priority queue implementation
+                FastPriorityQueue pq = new FastPriorityQueue(n);
 
                 // Precompute distances to start and end
                 double[] distToStart = new double[n];
-                double[] distToEnd = new double[n];
+                double[] distToEndSq = new double[n]; // Store squared distances to avoid sqrt
+                bool[] withinRangeFromStart = new bool[n];
+                bool[] withinRangeFromEnd = new bool[n];
+
                 for (int i = 0; i < n; i++)
                 {
-                    distToStart[i] = EuclideanDistance(intersections[i], start);
-                    distToEnd[i] = EuclideanDistance(intersections[i], end);
+                    double distSqStart = SquaredDistance(intersections[i], start);
+                    double distSqEnd = SquaredDistance(intersections[i], end);
+
+                    withinRangeFromStart[i] = distSqStart <= rSquared + eps;
+                    withinRangeFromEnd[i] = distSqEnd <= rSquared + eps;
+
+                    if (withinRangeFromStart[i])
+                    {
+                        distToStart[i] = Math.Sqrt(distSqStart); // Only compute sqrt when needed
+                    }
+
+                    distToEndSq[i] = distSqEnd;
                 }
 
                 // Initialize queue with reachable nodes from start
                 for (int i = 0; i < n; i++)
                 {
-                    if (distToStart[i] <= r + eps)
+                    if (withinRangeFromStart[i])
                     {
                         dist[i] = distToStart[i] / walkSpeed;
                         pq.Enqueue(i, dist[i]);
@@ -129,46 +245,41 @@ namespace Route_Mapper_Pro
 
                 // Check direct walking path
                 double directDistance = EuclideanDistance(start, end);
-                double answer = double.PositiveInfinity;
-                if (directDistance <= r + eps)
-                {
-                    answer = directDistance / walkSpeed;
-                }
+                double bestTime = directDistance <= r + eps ? directDistance / walkSpeed : double.PositiveInfinity;
+                int bestNode = -1;
 
                 // Dijkstra's algorithm
-                while (pq.Count > 0)
+                while (pq.TryDequeue(out int cur, out double cost))
                 {
-                    if (!pq.TryDequeue(out int cur, out double cost))
-                        break;
-
+                    // Skip if we've found a better path to this node already
                     if (cost > dist[cur] + eps)
                         continue;
 
-                    foreach (var neighbor in roads[cur])
+                    // Early termination check - if current node is within walking range of end
+                    if (withinRangeFromEnd[cur])
                     {
-                        int neighborNode = neighbor.Key;
-                        double neighborCost = neighbor.Value;
-                        double newCost = cost + neighborCost;
-                        if (newCost < dist[neighborNode] - eps)
+                        double endDistance = Math.Sqrt(distToEndSq[cur]);
+                        double totalCost = cost + (endDistance / walkSpeed);
+                        if (totalCost < bestTime)
                         {
-                            dist[neighborNode] = newCost;
-                            parent[neighborNode] = cur;
-                            pq.Enqueue(neighborNode, newCost);
+                            bestTime = totalCost;
+                            bestNode = cur;
                         }
                     }
-                }
 
-                // Find best end node
-                int bestNode = -1;
-                for (int i = 0; i < n; i++)
-                {
-                    if (distToEnd[i] <= r + eps)
+                    // Skip exploring further if we have better paths
+                    if (cost > bestTime)
+                        continue;
+
+                    // Explore neighbors
+                    foreach (var (neighbor, edgeCost, length) in roads[cur])
                     {
-                        double totalCost = dist[i] + (distToEnd[i] / walkSpeed);
-                        if (totalCost < answer - eps)
+                        double newCost = cost + edgeCost;
+                        if (newCost < dist[neighbor] - eps)
                         {
-                            answer = totalCost;
-                            bestNode = i;
+                            dist[neighbor] = newCost;
+                            parent[neighbor] = cur;
+                            pq.Enqueue(neighbor, newCost);
                         }
                     }
                 }
@@ -177,29 +288,60 @@ namespace Route_Mapper_Pro
                 List<int> path = new List<int>();
                 if (bestNode != -1)
                 {
+                    // First count the path length to properly allocate the list
+                    int pathLength = 0;
                     int current = bestNode;
+                    while (current != -1)
+                    {
+                        pathLength++;
+                        current = parent[current];
+                    }
+
+                    // Allocate the list with exact capacity
+                    path = new List<int>(pathLength);
+
+                    // Fill the list in reverse order
+                    current = bestNode;
                     while (current != -1)
                     {
                         path.Add(current);
                         current = parent[current];
                     }
+
+                    // Reverse the path once to get correct order
                     path.Reverse();
                 }
 
                 // Calculate distances
                 double drivingDistance = 0;
-                double walkingDistanceStart = bestNode != -1 ? distToStart[path[0]] : 0;
-                double walkingDistanceEnd = bestNode != -1 ? distToEnd[path[path.Count - 1]] : 0;
+                double walkingDistanceStart = 0;
+                double walkingDistanceEnd = 0;
 
                 if (path.Count > 0)
                 {
+                    walkingDistanceStart = distToStart[path[0]];
+                    walkingDistanceEnd = Math.Sqrt(distToEndSq[path[path.Count - 1]]);
+
+                    // Calculate driving distance using the path
                     for (int i = 1; i < path.Count; i++)
                     {
-                        drivingDistance += lengths[path[i - 1]][path[i]];
+                        int u = path[i - 1];
+                        int v = path[i];
+
+                        // Find edge length between u and v
+                        foreach (var (neighbor, _, length) in roads[u])
+                        {
+                            if (neighbor == v)
+                            {
+                                drivingDistance += length;
+                                break;
+                            }
+                        }
                     }
                 }
                 else if (directDistance <= r + eps)
                 {
+                    // Direct walking path case
                     walkingDistanceStart = directDistance;
                 }
 
@@ -210,7 +352,7 @@ namespace Route_Mapper_Pro
                 mapData.QueryResults.Add(new QueryResult
                 {
                     PathIds = path,
-                    ShortestTime = answer * 60,
+                    ShortestTime = bestTime * 60, // Convert to minutes
                     TotalDistance = totalWalk + totalDriving,
                     WalkingDistance = totalWalk,
                     VehicleDistance = totalDriving
@@ -222,37 +364,33 @@ namespace Route_Mapper_Pro
 
         public static MapData SolveWithTiming(MapData mapData, string FileName)
         {
-            //Read Query File
+            // Read Query File
             var stopwatchRead = System.Diagnostics.Stopwatch.StartNew();
             List<Query> queries = mapData.ReadQueryFile(FileName);
             mapData.QueryResults.Clear();
             stopwatchRead.Stop();
 
-
-            //Get Solution and time Without IO
+            // Get Solution and time Without IO
             var stopwatchSolve = System.Diagnostics.Stopwatch.StartNew();
             mapData = Solve(mapData, queries);
             stopwatchSolve.Stop();
 
-            // save time
+            // Save time
             mapData.QueryExecutionTime = stopwatchSolve.ElapsedMilliseconds;
             mapData.QueryExecutionTime_with_IO = mapData.QueryExecutionTime_Load_map +
                                                 stopwatchRead.ElapsedMilliseconds +
-                                                stopwatchSolve.ElapsedMilliseconds
-                                                ;
+                                                stopwatchSolve.ElapsedMilliseconds;
 
             // Print Output File
             string name = Path.GetFileNameWithoutExtension(FileName);
-
             string outputFilePath = Path.Combine(
                     Path.GetDirectoryName(FileName),
-                     "output" + name[name.Length - 1] + ".txt"
+                    "output" + name[name.Length - 1] + ".txt"
                 );
             MapData.WriteOutputFile(outputFilePath, mapData);
-
-
 
             return mapData;
         }
     }
 }
+ 

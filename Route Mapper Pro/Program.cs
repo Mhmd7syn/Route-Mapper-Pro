@@ -14,15 +14,15 @@ namespace Route_Mapper_Pro
         [STAThread]
         static void Main()
         {
-            //Application.EnableVisualStyles();
-            //Application.SetCompatibleTextRenderingDefault(false);
-            //Application.Run(new Form1());
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            Application.Run(new Form1());
 
             // Run Large File without GUI
-            MapData mapData = new MapData();
-            string folder_path = "C:\\Users\\HP\\OneDrive - Faculty of Computer and Information Sciences (Ain Shams University)\\Route-Mapper-Pro\\[2] Medium Cases\\Input\\";
-            mapData.LoadMapFile(folder_path + "OLMap.txt");
-            PathFinder.SolveWithTiming(mapData, folder_path + "OLQueries.txt");
+            // MapData mapData = new MapData();
+            // string folder_path = "D:\\Study\\Algo\\Project\\Route-Mapper-Pro\\[3] Large Cases\\Input\\";
+            // mapData.LoadMapFile(folder_path + "SFMap.txt");
+            // PathFinder.SolveWithTiming(mapData, folder_path + "SFQueries.txt");
         }
     }
 }
